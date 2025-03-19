@@ -12,28 +12,39 @@ namespace TodoApp.Services
         private readonly TodoDbContext _context;
         private readonly ILogger<TaskService> _logger;
 
-        public TaskService(TodoDbContext context, ILogger<TaskService> logger)
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(10);
+
+        public TaskService(TodoDbContext context, ILogger<TaskService> logger, IMemoryCache cache)
         {
             _context = context;
             _logger = logger;
+            _cache = cache;
         }
 
         public async Task<PagedTasksResponseDto> GetTasksAsync(
-            int pageIndex = 1, 
-            int pageSize = 10, 
-            string? searchTerm = null, 
-            Status? status = null, 
-            Priority? priority = null, 
-            DateTime? dueDateStart = null, 
+            int pageIndex = 1,
+            int pageSize = 10,
+            string? searchTerm = null,
+            Status? status = null,
+            Priority? priority = null,
+            DateTime? dueDateStart = null,
             DateTime? dueDateEnd = null)
         {
-            // Build query
+            var cacheKey = $"tasks_{pageIndex}_{pageSize}_{searchTerm}_{status}_{priority}_{dueDateStart}_{dueDateEnd}";
+
+            if (_cache.TryGetValue(cacheKey, out PagedTasksResponseDto cachedResult) && cachedResult != null)
+            {
+                _logger.LogInformation("Returning cached result for key: {CacheKey}", cacheKey);
+                return cachedResult;
+            }
+
             IQueryable<TodoTask> query = _context.Tasks;
 
             // Apply filters
             if (!string.IsNullOrEmpty(searchTerm))
             {
-                query = query.Where(t => t.Title.Contains(searchTerm) || 
+                query = query.Where(t => t.Title.Contains(searchTerm) ||
                                      (t.Description != null && t.Description.Contains(searchTerm)));
             }
 
@@ -57,10 +68,8 @@ namespace TodoApp.Services
                 query = query.Where(t => t.DueDate <= dueDateEnd.Value);
             }
 
-            // Get total count
             var totalCount = await query.CountAsync();
 
-            // Apply pagination
             var tasks = await query
                 .OrderBy(t => t.DueDate)
                 .ThenByDescending(t => t.Priority)
@@ -87,12 +96,21 @@ namespace TodoApp.Services
                 PageSize = pageSize
             };
 
+            _cache.Set(cacheKey, result, _cacheDuration);
+            _logger.LogInformation("Cached result for key: {CacheKey}", cacheKey);
+
             return result;
         }
 
         public async Task<TaskDetailResponseDto?> GetTaskByIdAsync(int id)
         {
             var cacheKey = $"task_{id}";
+
+            if (_cache.TryGetValue(cacheKey, out TaskDetailResponseDto cachedResult) && cachedResult != null)
+            {
+                _logger.LogInformation("Returning cached result for key: {CacheKey}", cacheKey);
+                return cachedResult;
+            }
 
             var task = await _context.Tasks
                 .Include(t => t.DependencyOf)
@@ -130,6 +148,9 @@ namespace TodoApp.Services
                 }).ToList()
             };
 
+            _cache.Set(cacheKey, taskDto, _cacheDuration);
+            _logger.LogInformation("Cached result for key: {CacheKey}", cacheKey);
+
             return taskDto;
         }
 
@@ -148,6 +169,7 @@ namespace TodoApp.Services
             _context.Tasks.Add(task);
             await _context.SaveChangesAsync();
 
+            InvalidateTaskCache();
 
             return new TaskResponseDto
             {
@@ -173,22 +195,24 @@ namespace TodoApp.Services
             // Update only provided properties
             if (taskDto.Title != null)
                 task.Title = taskDto.Title;
-            
+
             if (taskDto.Description != null) // Allow explicit null to clear description
                 task.Description = taskDto.Description;
-            
+
             if (taskDto.DueDate.HasValue)
                 task.DueDate = taskDto.DueDate;
-            
+
             if (taskDto.Priority.HasValue)
                 task.Priority = taskDto.Priority.Value;
-            
+
             if (taskDto.Status.HasValue)
                 task.Status = taskDto.Status.Value;
 
             task.UpdatedAt = DateTime.UtcNow;
 
             await _context.SaveChangesAsync();
+
+            InvalidateTaskCache(id);
 
             return new TaskResponseDto
             {
@@ -218,10 +242,23 @@ namespace TodoApp.Services
 
             _context.TaskDependencies.RemoveRange(dependencies);
             _context.Tasks.Remove(task);
-            
+
             await _context.SaveChangesAsync();
 
+            InvalidateTaskCache(id);
+
             return true;
+        }
+
+        private void InvalidateTaskCache(int? taskId = null)
+        {
+            if (taskId.HasValue)
+            {
+                _cache.Remove($"task_{taskId.Value}");
+                _logger.LogInformation("Cache invalidated for task_{TaskId}", taskId.Value);
+            }
+
+            _cache.Remove("tasks_marker");
         }
     }
 }

@@ -17,14 +17,12 @@ namespace TodoApp.Configurations
                 options.UseSqlServer(configuration.GetConnectionString("DefaultConnection"));
             });
 
-            // Register Repositories
-
-            // Register Services
             services.AddScoped<ITaskService, TaskService>();
             services.AddScoped<IDependencyService, DependencyService>();
 
-            // Register HttpClient
             services.AddHttpClient();
+
+            services.AddMemoryCache();
 
             return services;
         }

@@ -11,11 +11,14 @@ namespace TodoApp.Services
     {
         private readonly TodoDbContext _context;
         private readonly ILogger<DependencyService> _logger;
+        private readonly IMemoryCache _cache;
+        private readonly TimeSpan _cacheDuration = TimeSpan.FromMinutes(10);
 
-        public DependencyService(TodoDbContext context, ILogger<DependencyService> logger)
+        public DependencyService(TodoDbContext context, ILogger<DependencyService> logger, IMemoryCache cache)
         {
             _context = context;
             _logger = logger;
+            _cache = cache;
         }
 
         public async Task<DependencyResponseDto?> CreateDependencyAsync(DependencyCreateDto dependencyDto)
@@ -54,6 +57,8 @@ namespace TodoApp.Services
             _context.TaskDependencies.Add(dependency);
             await _context.SaveChangesAsync();
 
+            InvalidateDependencyCache(dependencyDto.DependentTaskId, dependencyDto.DependencyTaskId);
+
             return new DependencyResponseDto
             {
                 Id = dependency.Id,
@@ -72,9 +77,13 @@ namespace TodoApp.Services
                 return false;
             }
 
+            var dependentId = dependency.DependentTaskId;
+            var dependencyId = dependency.DependencyTaskId;
+            
             _context.TaskDependencies.Remove(dependency);
             await _context.SaveChangesAsync();
 
+            InvalidateDependencyCache(dependentId, dependencyId);
 
             return true;
         }
@@ -82,6 +91,11 @@ namespace TodoApp.Services
         public async Task<IEnumerable<DependencyResponseDto>> GetTaskDependenciesAsync(int taskId)
         {
             var cacheKey = $"dependencies_{taskId}";
+
+            if (_cache.TryGetValue(cacheKey, out IEnumerable<DependencyResponseDto> cachedDependencies) && cachedDependencies != null)
+            {
+                return cachedDependencies;
+            }
 
             var dependencies = await _context.TaskDependencies
                 .Include(d => d.DependentTask)
@@ -97,6 +111,7 @@ namespace TodoApp.Services
                 })
                 .ToListAsync();
 
+            _cache.Set(cacheKey, dependencies, _cacheDuration);
 
             return dependencies;
         }
@@ -105,16 +120,22 @@ namespace TodoApp.Services
         {
             var cacheKey = $"dependency_hierarchy_{taskId}";
 
+            if (_cache.TryGetValue(cacheKey, out DependencyHierarchyDto? cachedHierarchy) && cachedHierarchy != null)
+            {
+                return cachedHierarchy;
+            }
+
             var task = await _context.Tasks.FindAsync(taskId);
             if (task == null)
             {
                 return null;
             }
 
-            // Use HashSet to track visited tasks to avoid infinite recursion
             var visitedTasks = new HashSet<int>();
 
             var result = await BuildDependencyHierarchyAsync(taskId, 0, visitedTasks);
+
+            _cache.Set(cacheKey, result, _cacheDuration);
 
             return result;
         }
@@ -161,6 +182,14 @@ namespace TodoApp.Services
 
         public async Task<bool> HasCircularDependencyAsync(int dependentTaskId, int dependencyTaskId)
         {
+            var cacheKey = $"circular_dependency_{dependentTaskId}_{dependencyTaskId}";
+
+            // Try to get from cache
+            if (_cache.TryGetValue(cacheKey, out bool cachedResult))
+            {
+                return cachedResult;
+            }
+
             if (dependentTaskId == dependencyTaskId)
             {
                 return true;
@@ -168,23 +197,21 @@ namespace TodoApp.Services
 
             var visitedTasks = new HashSet<int>();
 
-            return await CheckCircularDependencyAsync(dependencyTaskId, dependentTaskId, visitedTasks);
+            var result = await CheckCircularDependencyAsync(dependencyTaskId, dependentTaskId, visitedTasks);
+
+            _cache.Set(cacheKey, result, _cacheDuration);
+
+            return result;
         }
 
         private async Task<bool> CheckCircularDependencyAsync(int currentTaskId, int targetTaskId,
             HashSet<int> visitedTasks)
         {
-            if (visitedTasks.Contains(currentTaskId))
-            {
-                return false;
-            }
+            if (visitedTasks.Contains(currentTaskId)) return false;
 
             visitedTasks.Add(currentTaskId);
 
-            var dependencies = await _context.TaskDependencies
-                .Where(d => d.DependentTaskId == currentTaskId)
-                .Select(d => d.DependencyTaskId)
-                .ToListAsync();
+            var dependencies = await _context.TaskDependencies.Where(d => d.DependentTaskId == currentTaskId).Select(d => d.DependencyTaskId).ToListAsync();
 
             if (dependencies.Contains(targetTaskId))
             {
@@ -201,5 +228,18 @@ namespace TodoApp.Services
 
             return false;
         }
+        private void InvalidateDependencyCache(int dependentTaskId, int dependencyTaskId)
+        {
+            // Remove specific caches
+            _cache.Remove($"dependencies_{dependentTaskId}");
+            _cache.Remove($"dependencies_{dependencyTaskId}");
+            _cache.Remove($"dependency_hierarchy_{dependentTaskId}");
+            _cache.Remove($"dependency_hierarchy_{dependencyTaskId}");
+            _cache.Remove($"circular_dependency_{dependentTaskId}_{dependencyTaskId}");
+
+            _logger.LogInformation("Dependency cache invalidated for tasks {DependentId} and {DependencyId}",
+                dependentTaskId, dependencyTaskId);
+        }
+
     }
 }
