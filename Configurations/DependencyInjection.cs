@@ -10,7 +10,6 @@ namespace TodoApp.Configurations
     {
         public static IServiceCollection AddApplicationServices(this IServiceCollection services)
         {
-            // Database services
             services.AddDbContext<TodoDbContext>(options =>
             {
                 var configuration = services.BuildServiceProvider().GetRequiredService<IConfiguration>();

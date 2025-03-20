@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  # SQL Server service
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=StrongPassword123! # Change this to a secure password in production
+      - MSSQL_PID=Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+    restart: unless-stopped
+    healthcheck:
+      test: /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "StrongPassword123!" -Q "SELECT 1" -b -o /dev/null
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - todo-network
+
+  # TodoApp service
+  todoapp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5182:80"
+    restart: unless-stopped
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Server=sqlserver;Database=ToDoApp;User Id=sa;Password=StrongPassword123!;TrustServerCertificate=True
+      - SA_PASSWORD=StrongPassword123! # Needed for wait-for-db script
+    networks:
+      - todo-network
+
+volumes:
+  sqlserver-data:
+
+networks:
+  todo-network:
+    driver: bridge
